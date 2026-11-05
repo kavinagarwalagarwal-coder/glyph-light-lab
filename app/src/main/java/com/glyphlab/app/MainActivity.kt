@@ -156,7 +156,77 @@ class MainActivity : Activity() {
         }.onFailure { line("  FAILED: ${it.javaClass.simpleName}: ${it.message}") }
     }
 
+    // ---------------------------------------------------------------- brightness and fading
+
+    /** Which phone to register as for the brightness tests; the user picks one that lit the LED. */
+    private var fadeTarget: Pair<String, String?>? = null
+    private var fadeRun: Runnable? = null
+
+    /** Registers as the chosen phone and opens a session; false (with a log line) if it can't. */
+    private fun openFor(label: String): GlyphManager? {
+        val manager = glyph ?: run { line("Toolkit not available."); return null }
+        if (!connected) { line("[$label] Not connected to the Glyph service yet."); return null }
+        val target = fadeTarget ?: targets.first { it.first.startsWith("Phone (2a) Plus") }
+        return runCatching {
+            val ok = if (target.second == null) manager.register() else manager.register(target.second)
+            if (sessionOpen) runCatching { manager.closeSession() }
+            manager.openSession()
+            sessionOpen = true
+            line("[$label] as ${target.first}: register = $ok, session opened")
+            manager
+        }.getOrElse { line("[$label] FAILED: ${it.javaClass.simpleName}: ${it.message}"); null }
+    }
+
+    /**
+     * Fades channel 0 up and down twice by sending a new brightness ~25 times a second, either per
+     * channel ([useColors] false) or through setFrameColors. [max] is the brightness scale to try.
+     */
+    private fun fade(max: Int, useColors: Boolean) {
+        val label = "Fade 0–$max" + if (useColors) " (frame colours)" else ""
+        val manager = openFor(label) ?: return
+        fadeRun?.let(handler::removeCallbacks)
+        val steps = 40
+        var i = 0
+        var errors = 0
+        line("  fading for ~3 s. Smooth fade, steps, or just on/off?")
+        fadeRun = object : Runnable {
+            override fun run() {
+                if (i > steps * 2) { runCatching { manager.turnOff() }; line("  [$label] done, errors: $errors"); return }
+                // Triangle wave: up, down, up, down.
+                val phase = (i % steps).toFloat() / steps
+                val level = ((if (phase < .5f) phase * 2 else (1 - phase) * 2) * max).toInt()
+                runCatching {
+                    if (useColors) manager.setFrameColors(IntArray(33) { if (it == 0) level else 0 })
+                    else manager.toggle(manager.glyphFrameBuilder.buildChannel(0, level).build())
+                }.onFailure { if (errors++ == 0) line("  first error: ${it.javaClass.simpleName}: ${it.message}") }
+                i++
+                handler.postDelayed(this, 40)
+            }
+        }.also { handler.post(it) }
+    }
+
+    /** Holds 10%, 25%, 50%, 100% of [max] for 1.5 s each, to see whether levels look different. */
+    private fun levels(max: Int) {
+        val label = "Levels of $max"
+        val manager = openFor(label) ?: return
+        fadeRun?.let(handler::removeCallbacks)
+        val levels = listOf(10, 25, 50, 100)
+        line("  showing 10%, 25%, 50%, 100% for 1.5 s each. Do they look different?")
+        var i = 0
+        fadeRun = object : Runnable {
+            override fun run() {
+                if (i == levels.size) { runCatching { manager.turnOff() }; line("  [$label] done"); return }
+                val v = max * levels[i] / 100
+                runCatching { manager.toggle(manager.glyphFrameBuilder.buildChannel(0, v).build()) }
+                    .onFailure { line("  ${levels[i]}% failed: ${it.message}") }
+                i++
+                handler.postDelayed(this, 1_500)
+            }
+        }.also { handler.post(it) }
+    }
+
     private fun glyphOff() {
+        fadeRun?.let(handler::removeCallbacks)
         runCatching { glyph?.turnOff() }.onFailure { line("turnOff failed: ${it.message}") }
         line("Sent: all off")
     }
@@ -239,7 +309,23 @@ class MainActivity : Activity() {
             topMargin = (6 * dp).toInt()
         })
 
-        column.addView(text("3 · Android's notification light", 17f, bold = true))
+        column.addView(text("3 · Brightness and fading", 17f, bold = true))
+        column.addView(text("First pick a phone that lit the light above, then try each test and note smooth fade / steps / on-off only.", 13f, Color.LTGRAY))
+        val picked = text("Using: Phone (2a) Plus", 13f, Color.rgb(170, 230, 190))
+        column.addView(picked)
+        val pickRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val picker = android.widget.HorizontalScrollView(this).apply { addView(pickRow) }
+        for (t in targets.drop(1)) {
+            pickRow.addView(button(t.first.removePrefix("Phone ")) {
+                fadeTarget = t; picked.text = "Using: ${t.first}"
+            }, LinearLayout.LayoutParams(-2, (40 * dp).toInt()).apply { setMargins((3 * dp).toInt(), 0, (3 * dp).toInt(), 0) })
+        }
+        column.addView(picker, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = (6 * dp).toInt() })
+        column.addView(row(text("Fade", 13f), button("0–255") { fade(255, false) }, button("0–4095") { fade(4095, false) }))
+        column.addView(row(text("Fade (frame colours)", 13f), button("0–255") { fade(255, true) }, button("0–4095") { fade(4095, true) }))
+        column.addView(row(text("Brightness levels", 13f), button("of 255") { levels(255) }, button("of 4095") { levels(4095) }))
+
+        column.addView(text("4 · Android's notification light", 17f, bold = true))
         column.addView(text("Tap, lock the screen within 5 seconds, and watch the back.", 13f, Color.LTGRAY))
         column.addView(button("Blink with a notification") { tryNotificationLight() }, LinearLayout.LayoutParams(-1, (44 * dp).toInt()))
 
