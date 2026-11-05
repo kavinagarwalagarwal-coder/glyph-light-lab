@@ -1,0 +1,51 @@
+name: Build test APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Build APK
+        run: |
+          set -o pipefail
+          gradle --no-daemon :app:assembleDebug 2>&1 | tee gradle.log || {
+            summary=$(grep -E -A4 "^e: |FAILED|What went wrong|error:" gradle.log | head -30 | tr '\n' '|' | sed 's/%/%25/g')
+            echo "::error title=Gradle build failed::${summary:0:3800}"
+            exit 1
+          }
+          cp app/build/outputs/apk/debug/app-debug.apk glyph-light-lab.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glyph-light-lab-apk
+          path: glyph-light-lab.apk
+
+      # Keep one always-current download on the Releases page, easy to grab from the phone.
+      - name: Publish test build
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete test-build --yes --cleanup-tag || true
+          gh release create test-build glyph-light-lab.apk --prerelease \
+            --title "Test build" \
+            --notes "Latest build of Glyph Light Lab from ${GITHUB_SHA::7}. Install glyph-light-lab.apk on the phone."
